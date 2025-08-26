@@ -1,16 +1,24 @@
-//******************************************/
+//************************************************************/
 // Universidad del Valle de Guatemala
-// BE3029 - Electronica Digital 2
+// BE3029 - Electronica digital 2
 // Youri Estrada
-// 25/08/2025
-// Proyecto 1
-// MCU: ESP32 dev kit 1.0
+// Proyecto 1 
+// MCU: ESP32
+//************************************************************/
+
+//******************************************/
+// Librerias
 //******************************************/
 #include <Arduino.h>
 #include "Display7.h"
-#include "config.h"
-#define pinBoton 12   
-#define pinLM35 34   
+#include "config.h" 
+
+//******************************************/
+// Definiciones
+//******************************************/
+// --- Pines de Hardware ---
+#define pinBoton 12
+#define pinLM35 34
 #define D1 21
 #define D2 22
 #define D3 23
@@ -19,179 +27,189 @@
 #define LEDG 26
 #define servo 13
 
-
-// Arreglos
-const int Servo[3] = {6554, 4915, 3500};
-int posicion_servo = 0;
-// Canales PWM
+// --- PWM ---
 #define pwmChannel 0
 #define pwmChannel1 1
 #define pwmChannel2 2
 #define pwmChannel3 4
-// Frecuencias y Resolución
 #define freqPWM 100
 #define resPWN 6
 #define freqPWM_servo 50
 #define resPWM_servo 16
 
-// Prototipos de funciones
-void initPWN(void);
-void initPWN1(void);
-void initPWN2(void);
-void initServo(void);
-
-int decena = 0;
-int unidad = 0;
-int decimal = 0;
-// --- Constantes para el cálculo de temperatura ---
-const float VOLTAJE_REFERENCIA = 3.3;        // Voltaje de trabajo del ESP32
-const int RESOLUCION_ADC = 4096;             // Resolución del ADC de 12 bits
+//******************************************/
+// Variables Globales
+//******************************************/
+// --- Lógica del Proyecto ---
+const int Servo[3] = {6554, 4915, 3500};
+int posicion_servo = 0;
+float temperaturaFiltrada = 0.0;
+bool primeraLectura = true;
+const float alpha = 0.2;
 const float FACTOR_CONVERSION = 0.11;
 
-const float alpha = 0.2;            
-float temperaturaFiltrada = 0.0;    // Variable para almacenar el valor filtrado
-bool primeraLectura = true;         // Bandera para inicializar el filtro
+// --- Variables para el Display ---
+volatile int decena = 0, unidad = 0, decimal = 0;
+volatile int digitoActivo = 0;
 
-// --- Variables para el Debounce del botón ---
-int estadoBoton = HIGH;
-int ultimoEstadoBoton = HIGH;
-unsigned long ultimoTiempoDebounce = 0;
-unsigned long delayDebounce = 50;
+// --- Variables para Interrupciones ---
+hw_timer_t *timerMultiplex = NULL;         
+volatile bool botonPresionado = false;      
+volatile uint32_t ultimoDebounce = 0;       
 
-unsigned long tiempoPrevio = 0;
-const long intervalo = 5000; // Intervalo de envío de datos en milisegundos (10 segundos)
-AdafruitIO_Feed *canaltemperatura = io.feed("temperatura");
+// --- Adafruit IO ---
+AdafruitIO_Feed *canalTemperatura = io.feed("temperatura");
+
+//******************************************/
+// Prototipos de funciones
+//******************************************/
+void initPWMs(void);
+void initHardware(void);
+void initTimerMultiplex(void);
+void initBotonISR(void);
+void IRAM_ATTR TMR_Multiplex_ISR(void);
+void IRAM_ATTR btn_ISR(void);
+
+//*************************************************/
+// ISRs
+//*************************************************/
+// ISR para el multiplexeo del display - Se ejecuta cada 3ms
+void IRAM_ATTR TMR_Multiplex_ISR(void) {
+  // Apaga todos los transistores para evitar "ghosting"
+  digitalWrite(D1, LOW);
+  digitalWrite(D2, LOW);
+  digitalWrite(D3, LOW);
+
+  switch (digitoActivo) {
+    case 0: // Muestra la DECENA
+      desplegarNumero(decena);
+      desplegarPunto(0);
+      digitalWrite(D1, HIGH);
+      break;
+    case 1: // Muestra la UNIDAD
+      desplegarNumero(unidad);
+      desplegarPunto(1);
+      digitalWrite(D2, HIGH);
+      break;
+    case 2: // Muestra el DECIMAL
+      desplegarNumero(decimal);
+      desplegarPunto(0);
+      digitalWrite(D3, HIGH);
+      break;
+  }
+
+  digitoActivo = (digitoActivo + 1) % 3; // Avanza al siguiente dígito 
+}
+
+// ISR para el botón 
+void IRAM_ATTR btn_ISR(void) {
+  if (millis() - ultimoDebounce > 200) {
+    botonPresionado = true; 
+    ultimoDebounce = millis();
+  }
+}
 
 void setup() {
   Serial.begin(115200);
-  pinMode(pinBoton, INPUT_PULLUP); 
-  pinMode(D1, OUTPUT);
-  pinMode(D2, OUTPUT);
-  pinMode(D3, OUTPUT);
-  configDisplay7();
-  initPWN();
-  initPWN1();
-  initPWN2();
-  initServo();
-  Serial.print("Connecting to Adafruit IO");
+  initHardware();
+  initPWMs();
+  initBotonISR();       
+  initTimerMultiplex();   
+
+  Serial.print("Conectando a Adafruit IO");
   io.connect();
-  // Esperar a que se establezca la conexión
   while (io.status() < AIO_CONNECTED) {
     Serial.print(".");
     delay(500);
   }
-
-  Serial.println();
-  Serial.println(io.statusText());
-
+  Serial.println("\nConectado a Adafruit IO.");
 }
 
+
 void loop() {
-  io.run();
-  int valorADC = analogRead(pinLM35);
-  float temperaturaActual = valorADC * FACTOR_CONVERSION; 
-  // Aplicar el filtro EMMA
+  io.run(); 
+
+  // Lee y filtra la temperatura constantemente para tener siempre el valor más reciente
+  float temperaturaActual = analogRead(pinLM35) * FACTOR_CONVERSION;
   if (primeraLectura) {
-    temperaturaFiltrada = temperaturaActual; // Inicializa el filtro con la primera lectura
+    temperaturaFiltrada = temperaturaActual;
     primeraLectura = false;
   } else {
     temperaturaFiltrada = (alpha * temperaturaActual) + ((1.0 - alpha) * temperaturaFiltrada);
   }
 
-  int lecturaActualBoton = digitalRead(pinBoton);
-  if (lecturaActualBoton != ultimoEstadoBoton) {
-    ultimoTiempoDebounce = millis();
-  }
+  // Revisa si la ISR del botón activó la bandera
+  if (botonPresionado) {
+    // 1. Actualiza las variables VOLÁTILES que usa la ISR del display
+    decena = (int)(temperaturaFiltrada / 10) % 10;
+    unidad = (int)temperaturaFiltrada % 10;
+    decimal = (int)(temperaturaFiltrada * 10) % 10;
 
-  if ((millis() - ultimoTiempoDebounce) > delayDebounce) {
-    // Si el estado del botón ha cambiado y se ha estabilizado
-    if (lecturaActualBoton != estadoBoton) {
-      estadoBoton = lecturaActualBoton;
+    // 2. Controla los LEDs y el servo
+    if (temperaturaFiltrada < 22.0) posicion_servo = 0;
+    else if (temperaturaFiltrada < 25.0) posicion_servo = 1;
+    else posicion_servo = 2;
     
-      if (estadoBoton == LOW) {
-        Serial.print("  (RAW):  ");
-        Serial.print(valorADC); // Imprime el valor RAW actual
-        
-        Serial.print("  > Temperatura Filtrada (EMMA): ");
-        Serial.print(temperaturaFiltrada, 1); // Imprime el valor ya estabilizado
-        Serial.println(" °C");
-        Serial.println("------------------------------------");
-        Serial.print("Enviando a Adafruit IO -> ");
-        Serial.println(temperaturaFiltrada);
-        canaltemperatura->save(temperaturaFiltrada);
-        Serial.println("------------------------------------");
-        decena = (int)(temperaturaFiltrada / 10) % 10; // Obtenemos la decena (y nos aseguramos que sea un solo dígito)
-        unidad = (int)temperaturaFiltrada % 10;       // Obtenemos la unidad
-        decimal = (int)(temperaturaFiltrada * 10) % 10; // Obtenemos el primer decimal
-          if(temperaturaFiltrada<22.0){
-              posicion_servo=0;
-            } else if (temperaturaFiltrada>=22.0 && temperaturaFiltrada<25.0){
-              posicion_servo=1;
-            }else{
-              posicion_servo=2;
-            }
-              switch (posicion_servo) {
-                case 0: 
-                  ledcWrite(pwmChannel, 0); //led rojo
-                  ledcWrite(pwmChannel1, 0);  //led amarillo
-                  ledcWrite(pwmChannel2, 63); //led verde
-                  break; 
-                case 1: 
-                  ledcWrite(pwmChannel, 0); 
-                  ledcWrite(pwmChannel1, 63);  
-                  ledcWrite(pwmChannel2, 0);
-                  break; 
-                case 2:
-                  ledcWrite(pwmChannel, 63); 
-                  ledcWrite(pwmChannel1, 0);  
-                  ledcWrite(pwmChannel2, 0);
-                  break; 
-              }
-              ledcWrite(pwmChannel3, Servo[posicion_servo]);
-      }
+    switch (posicion_servo) {
+      case 0: 
+        ledcWrite(pwmChannel, 0); 
+        ledcWrite(pwmChannel1, 0); 
+        ledcWrite(pwmChannel2, 63);
+        break;
+      case 1: 
+        ledcWrite(pwmChannel, 0); 
+        ledcWrite(pwmChannel1, 63); 
+        ledcWrite(pwmChannel2, 0); 
+        break;
+      case 2: 
+        ledcWrite(pwmChannel, 63); 
+        ledcWrite(pwmChannel1, 0); 
+        ledcWrite(pwmChannel2, 0); 
+        break;
     }
+    ledcWrite(pwmChannel3, Servo[posicion_servo]);
+    
+    // 3. Envía los datos a Adafruit IO
+    Serial.print("Enviando a Adafruit IO -> ");
+    Serial.println(temperaturaFiltrada);
+    canalTemperatura->save(temperaturaFiltrada);
+
+    // 4. Baja la bandera para esperar la siguiente pulsación
+    botonPresionado = false;
   }
-  ultimoEstadoBoton = lecturaActualBoton;
-  digitalWrite(D1, HIGH);
-  digitalWrite(D2, LOW);
-  digitalWrite(D3, LOW);
-
-  desplegarNumero(decena);
-  desplegarPunto(0);
-  delay(15);
-
-  digitalWrite(D1, LOW);
-  digitalWrite(D2, HIGH);
-  digitalWrite(D3, LOW);
-
-  desplegarNumero(unidad);
-  desplegarPunto(1);
-  delay(15);
-
-  digitalWrite(D1, LOW);
-  digitalWrite(D2, LOW);
-  digitalWrite(D3, HIGH);
-
-  desplegarNumero(decimal);
-  desplegarPunto(0);
-  delay(15);
-
-  // Pequeña pausa para no saturar el ADC
-  delay(10); 
 }
-void initPWN(void) {
+
+//******************************************/
+// Otras Funciones
+//******************************************/
+void initHardware(void) {
+  pinMode(pinBoton, INPUT_PULLUP);
+  pinMode(D1, OUTPUT);
+  pinMode(D2, OUTPUT);
+  pinMode(D3, OUTPUT);
+  configDisplay7();
+}
+
+void initPWMs(void) {
   ledcSetup(pwmChannel, freqPWM, resPWN);
   ledcAttachPin(LEDR, pwmChannel);
-}
-void initPWN1(void) {
   ledcSetup(pwmChannel1, freqPWM, resPWN);
   ledcAttachPin(LEDA, pwmChannel1);
-}
-void initPWN2(void) {
   ledcSetup(pwmChannel2, freqPWM, resPWN);
   ledcAttachPin(LEDG, pwmChannel2);
-}
-void initServo(void) {
   ledcSetup(pwmChannel3, freqPWM_servo, resPWM_servo);
   ledcAttachPin(servo, pwmChannel3);
+}
+
+void initBotonISR(void) {
+  pinMode(pinBoton, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(pinBoton), btn_ISR, FALLING);
+}
+
+void initTimerMultiplex(void) {
+  timerMultiplex = timerBegin(0, 80, true);
+  timerAttachInterrupt(timerMultiplex, &TMR_Multiplex_ISR, true);
+  timerAlarmWrite(timerMultiplex, 3000, true);
+  // Activa la alarma
+  timerAlarmEnable(timerMultiplex);
 }
