@@ -2,19 +2,13 @@
 // Universidad del Valle de Guatemala
 // BE3029 - Electronica Digital 2
 // Youri Estrada
-// 24/08/2025
-// Proyecto
+// 25/08/2025
+// Proyecto 1
 // MCU: ESP32 dev kit 1.0
 //******************************************/
 #include <Arduino.h>
-#include <stdint.h>
-#include <driver/ledc.h>
-
-//******************************************/
-// Definiciones
-//******************************************/
-#include <Arduino.h>
 #include "Display7.h"
+#include "config.h"
 #define pinBoton 12   
 #define pinLM35 34   
 #define D1 21
@@ -24,6 +18,8 @@
 #define LEDA 27
 #define LEDG 26
 #define servo 13
+
+
 // Arreglos
 const int Servo[3] = {6554, 4915, 3500};
 int posicion_servo = 0;
@@ -31,7 +27,7 @@ int posicion_servo = 0;
 #define pwmChannel 0
 #define pwmChannel1 1
 #define pwmChannel2 2
-#define pwmChannel3 3
+#define pwmChannel3 4
 // Frecuencias y Resolución
 #define freqPWM 100
 #define resPWN 6
@@ -48,19 +44,23 @@ int decena = 0;
 int unidad = 0;
 int decimal = 0;
 // --- Constantes para el cálculo de temperatura ---
-const float VOLTAJE_REFERENCIA = 3.3
-const int RESOLUCION_ADC = 4096;
+const float VOLTAJE_REFERENCIA = 3.3;        // Voltaje de trabajo del ESP32
+const int RESOLUCION_ADC = 4096;             // Resolución del ADC de 12 bits
 const float FACTOR_CONVERSION = 0.11;
 
 const float alpha = 0.2;            
 float temperaturaFiltrada = 0.0;    // Variable para almacenar el valor filtrado
-bool primeraLectura = true;
+bool primeraLectura = true;         // Bandera para inicializar el filtro
 
 // --- Variables para el Debounce del botón ---
 int estadoBoton = HIGH;
 int ultimoEstadoBoton = HIGH;
 unsigned long ultimoTiempoDebounce = 0;
 unsigned long delayDebounce = 50;
+
+unsigned long tiempoPrevio = 0;
+const long intervalo = 5000; // Intervalo de envío de datos en milisegundos (10 segundos)
+AdafruitIO_Feed *canaltemperatura = io.feed("temperatura");
 
 void setup() {
   Serial.begin(115200);
@@ -73,15 +73,26 @@ void setup() {
   initPWN1();
   initPWN2();
   initServo();
+  Serial.print("Connecting to Adafruit IO");
+  io.connect();
+  // Esperar a que se establezca la conexión
+  while (io.status() < AIO_CONNECTED) {
+    Serial.print(".");
+    delay(500);
+  }
+
+  Serial.println();
+  Serial.println(io.statusText());
+
 }
 
 void loop() {
- 
+  io.run();
   int valorADC = analogRead(pinLM35);
   float temperaturaActual = valorADC * FACTOR_CONVERSION; 
   // Aplicar el filtro EMMA
   if (primeraLectura) {
-    temperaturaFiltrada = temperaturaActual;
+    temperaturaFiltrada = temperaturaActual; // Inicializa el filtro con la primera lectura
     primeraLectura = false;
   } else {
     temperaturaFiltrada = (alpha * temperaturaActual) + ((1.0 - alpha) * temperaturaFiltrada);
@@ -104,6 +115,10 @@ void loop() {
         Serial.print("  > Temperatura Filtrada (EMMA): ");
         Serial.print(temperaturaFiltrada, 1); // Imprime el valor ya estabilizado
         Serial.println(" °C");
+        Serial.println("------------------------------------");
+        Serial.print("Enviando a Adafruit IO -> ");
+        Serial.println(temperaturaFiltrada);
+        canaltemperatura->save(temperaturaFiltrada);
         Serial.println("------------------------------------");
         decena = (int)(temperaturaFiltrada / 10) % 10; // Obtenemos la decena (y nos aseguramos que sea un solo dígito)
         unidad = (int)temperaturaFiltrada % 10;       // Obtenemos la unidad
@@ -136,7 +151,6 @@ void loop() {
       }
     }
   }
-
   ultimoEstadoBoton = lecturaActualBoton;
   digitalWrite(D1, HIGH);
   digitalWrite(D2, LOW);
@@ -144,7 +158,7 @@ void loop() {
 
   desplegarNumero(decena);
   desplegarPunto(0);
-  delay(5);
+  delay(15);
 
   digitalWrite(D1, LOW);
   digitalWrite(D2, HIGH);
@@ -152,7 +166,7 @@ void loop() {
 
   desplegarNumero(unidad);
   desplegarPunto(1);
-  delay(5);
+  delay(15);
 
   digitalWrite(D1, LOW);
   digitalWrite(D2, LOW);
@@ -160,7 +174,7 @@ void loop() {
 
   desplegarNumero(decimal);
   desplegarPunto(0);
-  delay(5);
+  delay(15);
 
   // Pequeña pausa para no saturar el ADC
   delay(10); 
